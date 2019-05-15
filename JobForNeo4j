@@ -1,0 +1,1 @@
+CREATE (job:Job{task_name:"",desc:"",task_snapshot_serial_no:"",task_trigger_time:"",task_start_time:"",task_end_time:"",task_status_name:""})
