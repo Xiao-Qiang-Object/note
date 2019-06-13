@@ -1,0 +1,468 @@
+#!/bin/bash
+
+# start_time: 2019-01-07 00:00
+# end_time: 9999-12-31 00:00
+# frequency:  day
+# author: 
+# description: ods层与dwd层表结构/详细信息监控
+# create_time: 2019-01-07
+# change:2019-03-18 新增coscp库四张表
+# change:2019-05-05 修复部分表数据行数为0的问题
+
+#打印日志
+print_log()
+{
+    current_time=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$current_time $@"
+}
+
+startsec=$(date +%s)
+source /data/etlscript/PUBLIC/SCRIPT/TOOL/scriptHelper.sh
+resoveJson $1
+## 检查日志路径.
+checkLogPath $task_name
+exec &> $CMRH_DATAHUB_SCRIPT_LOG/$EXE_DATE/$task_name/$run_serial_no.log
+
+##参数名定义
+job_name=$0
+hivejdbc="jdbc:hive2://${src_ip}:${src_port}"
+mysqljdbc="jdbc:mysql://$dest_ip:$dest_port/$dest_dbname?useUnicode=true&characterEncoding=utf-8"
+
+print_log $p1
+print_log $p2
+print_log $p3
+
+start_path=$(pwd)
+OldIFS=$IFS
+IFS=':'
+array1=($p1)
+array2=($p2)
+IFS=$OldIFS
+print_log "test "
+echo "test"
+echo $start_path
+#取数据库cmft_cmcs cmrh_cmcs cmzq_cmcs cmbs_cmcs中ods_bas的表信息
+cd $start_path
+
+if [ -d cmcs_lw ];then
+   rm -r cmcs_lw
+   else
+   echo "文件夹已经删除"
+fi
+
+if [ ! -d cmcs_lw ];then
+   mkdir cmcs_lw
+   else
+   echo "文件夹已经存在"
+fi
+
+cd cmcs_lw
+
+if [ ! -d table_clomns ];then
+   mkdir table_clomns
+   else
+   echo "文件夹已经存在"
+fi
+if [ ! -d table_analysis ];then
+   mkdir table_analysis
+   else
+   echo "文件夹已经存在"
+fi
+
+#coscp库需要统计的表名放入了一个文件中，直接读取该文件即可
+new_db_name=$p3
+
+if [ ! -d $new_db_name ];then
+        mkdir $new_db_name
+        else
+        echo "文件夹已经存在"
+     fi
+
+for line in $(cat /data/etlscript/CMCS_ADS/SCRIPT/cmwt_metedata_analysis/$new_db_name.csv)
+do
+ if [ ! -z $line ]; then
+     echo "`date +%Y-%m-%d\ %T` $line"
+     new_file_name=$new_db_name"_"$line
+     beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "use $new_db_name;desc formatted $line;" > $new_db_name/$line.csv
+     start=`cat $start_path/cmcs_lw/$new_db_name/$line.csv | grep -a -n '# Detailed ' | cut -d':' -f1`
+     start_v=`expr $start - 1`
+     end=`cat $start_path/cmcs_lw/$new_db_name/$line.csv | grep -a -n '# Storage Information' | cut -d':' -f1`
+     cat $start_path/cmcs_lw/$new_db_name/$line.csv | awk -vstart=$start_v -vend=$end '{if((NR>3)&&(NR<start)) print }' > $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+     cat $start_path/cmcs_lw/$new_db_name/$line.csv | awk -vstart=$start -vend=$end '{if((NR>start)&&(NR<end)) print }' >  $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+     sed -i "s/,string,/\o001string\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+     sed -i "s/^/${new_db_name}\o001${line}\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+     sed -i 's/\x0//g' $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+     sed -i "s/^/${new_db_name},${line},/g" $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+ fi
+done
+
+
+#从三个成员企业库读表
+for db_name in ${array1[@]}
+do
+ if [ ! -z $db_name ];then
+  beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "use $db_name;show tables '*ods_*bas*';" > $db_name.csv
+
+    #去掉表头信息
+    sed -i '1d' $db_name.csv
+
+     if [ ! -d $db_name ];then
+        mkdir $db_name
+        else
+        echo "文件夹已经存在"
+     fi
+    #遍历每一个表名，并用desc formatted 读表
+    for line in $(cat $db_name.csv)
+    do
+     if [ ! -z $line ];then
+         echo "`date +%Y-%m-%d\ %T` $line"
+         res=$(echo $line | grep "delete";echo $line | grep "tmp";echo $line | grep "map";echo $line | grep "view";echo $line | grep "etl";echo $line | grep "test")
+         #删除的表不复制
+         new_file_name=$db_name"_"$line
+         if [ -z $res ];then
+            beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "use $db_name;desc formatted $line;" > $db_name/$line.csv
+            start=`cat $start_path/cmcs_lw/$db_name/$line.csv | grep -a -n '# Detailed ' | cut -d':' -f1`
+            start_v=`expr $start - 1`
+            end=`cat $start_path/cmcs_lw/$db_name/$line.csv | grep -a -n '# Storage Information' | cut -d':' -f1`
+            cat $start_path/cmcs_lw/$db_name/$line.csv | awk -vstart=$start_v -vend=$end '{if((NR>3)&&(NR<start)) print }' > $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            cat $start_path/cmcs_lw/$db_name/$line.csv | awk -vstart=$start -vend=$end '{if((NR>start)&&(NR<end)) print }' >  $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+            sed -i "s/,string,/\o001string\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i "s/^/${db_name}\o001${line}\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i 's/\x0//g' $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i "s/^/${db_name},${line},/g" $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+         fi
+     fi
+    done
+ fi
+done
+
+
+cd $start_path
+
+###删除新建的文件夹 cmcs_lw
+##if [ -d cmcs_lw ];then
+##   rm -r cmcs_lw
+##   else
+##   echo "文件夹已经删除"
+##fi
+
+#取cmf_cmcs中dwd的表信息
+#新建文件夹 cmcs_lw
+if [ ! -d cmcs_lw ];then
+   mkdir cmcs_lw
+   else
+   echo "文件夹已经存在"
+fi
+
+cd cmcs_lw
+
+if [ ! -d table_clomns ];then
+   mkdir table_clomns
+   else
+   echo "文件夹已经存在"
+fi
+if [ ! -d table_analysis ];then
+   mkdir table_analysis
+   else
+   echo "文件夹已经存在"
+fi
+
+for db_name in ${array2[@]}
+do
+ if [ ! -z $db_name ];then
+  beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "use $db_name;show tables;" > $db_name.csv
+
+    #去掉表头信息
+    sed -i '1d' $db_name.csv
+
+     if [ ! -d $db_name ];then
+        mkdir $db_name
+        else
+        echo "文件夹已经存在"
+     fi
+    #遍历每一个表名，并用desc formatted 读表
+    for line in $(cat $db_name.csv)
+    do
+     if [ ! -z $line ];then
+         echo "`date +%Y-%m-%d\ %T` $line"
+         res=$(echo $line | grep "delete";echo $line | grep "tmp";echo $line | grep "map";echo $line | grep "view";echo $line | grep "etl";echo $line | grep "test")
+         #删除的表不复制
+         new_file_name=$db_name"_"$line
+         if [ -z $res ];then
+            beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "use $db_name;desc formatted $line;" > $db_name/$line.csv
+            start=`cat $start_path/cmcs_lw/$db_name/$line.csv | grep -a -n '# Detailed ' | cut -d':' -f1`
+            start_v=`expr $start - 1`
+            end=`cat $start_path/cmcs_lw/$db_name/$line.csv | grep -a -n '# Storage Information' | cut -d':' -f1`
+            cat $start_path/cmcs_lw/$db_name/$line.csv | awk -vstart=$start_v -vend=$end '{if((NR>3)&&(NR<start)) print }' > $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            cat $start_path/cmcs_lw/$db_name/$line.csv | awk -vstart=$start -vend=$end '{if((NR>start)&&(NR<end)) print }' >  $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+            sed -i "s/,string,/\o001string\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i "s/^/${db_name}\o001${line}\o001/g" $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i 's/\x0//g' $start_path/cmcs_lw/table_clomns/$new_file_name.csv
+            sed -i "s/^/${db_name},${line},/g" $start_path/cmcs_lw/table_analysis/$new_file_name.csv
+         fi
+     fi
+    done
+ fi
+done
+
+##在hdfs上创建临时目录存放表字段文件
+hadoop fs -test -e /data/ftpFiles/cmcs/tmp/table_clomns
+if [ $? -eq 0 ] ;then
+  echo '目录已存在'
+else
+  hdfs dfs -mkdir /data/ftpFiles/cmcs/tmp/table_clomns
+fi
+
+##将元数据文件上传到hdfs上
+hdfs dfs -put $start_path/cmcs_lw/table_clomns/* /data/ftpFiles/cmcs/tmp/table_clomns
+
+##在hdfs上创建临时目录存放表详细信息的文件
+hadoop fs -test -e /data/ftpFiles/cmcs/tmp/table_analysis
+if [ $? -eq 0 ] ;then
+  echo '目录已存在'
+else
+  hdfs dfs -mkdir /data/ftpFiles/cmcs/tmp/table_analysis
+fi
+
+##将元数据文件上传到hdfs上
+hdfs dfs -put $start_path/cmcs_lw/table_analysis/* /data/ftpFiles/cmcs/tmp/table_analysis
+
+##授权
+hadoop fs -chmod -R 777 /data/ftpFiles/cmcs/tmp/
+
+beeline -u $hivejdbc -n $src_user -p $src_password -e "
+use cmf_cmcs;
+
+SET mapred.job.queue.name=${hive_queue};
+SET mapred.job.name=${job_name};
+
+drop table if exists ads_cmwt_table_clomns_lw_tmp;
+
+create table if not exists ads_cmwt_table_clomns_lw_tmp
+( db_name              string           comment'库名'
+ ,table_name           string           comment'表名'
+ ,clo_name             STRING           COMMENT'列名'
+ ,data_type            STRING           COMMENT'字段类型'
+ ,comment              STRING           COMMENT'描述'
+)
+COMMENT '表结构描述临时表'
+ROW FORMAT DELIMITED  FIELDS TERMINATED BY '\001' STORED AS TEXTFILE;
+
+load data inpath 'hdfs:/data/ftpFiles/cmcs/tmp/table_clomns/*' into table ads_cmwt_table_clomns_lw_tmp;
+
+drop table if exists ads_cmwt_table_analysis_lw_tmp;
+
+create table if not exists ads_cmwt_table_analysis_lw_tmp
+( db_name           string         comment'库名'
+ ,table_name        string         comment'表名'
+ ,detailed          string         comment'详细信息'
+ ,info              string         comment'详细信息描述'
+ ,other_info        string         comment'详细信息其他描述'
+)
+comment'表详细信息临时表'
+ROW FORMAT DELIMITED  FIELDS TERMINATED BY ',' STORED AS TEXTFILE;
+
+load data inpath 'hdfs:/data/ftpFiles/cmcs/tmp/table_analysis/*' into table ads_cmwt_table_analysis_lw_tmp;
+
+"
+exitCodeCheck $? $startsec $run_serial_no $task_name
+
+##将hdfs上的文件导入hive表之后删除hdfs上创建的临时文件
+hadoop fs -test -e /data/ftpFiles/cmcs/tmp/table_clomns
+if [ $? -eq 0 ] ;then
+  hdfs dfs -rm -r /data/ftpFiles/cmcs/tmp/table_clomns
+else
+  echo '目录已删除'
+fi
+
+
+hadoop fs -test -e /data/ftpFiles/cmcs/tmp/table_analysis
+if [ $? -eq 0 ] ;then
+  hdfs dfs -rm -r /data/ftpFiles/cmcs/tmp/table_analysis
+else
+  echo '目录已删除'
+fi
+
+
+beeline -u $hivejdbc -n $src_user -p $src_password -e "
+USE CMF_CMCS;
+SET mapred.job.queue.name=${hive_queue};
+SET mapred.job.name=${job_name};
+
+drop table if exists ads_cmwt_t_metedata_columns;
+
+create table if not exists ads_cmwt_t_metedata_columns
+( db_name              string           comment'库名'
+ ,table_name           string           comment'表名'
+ ,column_name          STRING           COMMENT'列名'
+ ,column_type          STRING           COMMENT'字段类型'
+ ,column_comment       STRING           COMMENT'描述'
+ ,updated_time         STRING           COMMENT'描述'
+)
+COMMENT '表结构描述临时表'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\001' STORED AS TEXTFILE;
+
+drop table if exists ads_cmwt_t_metedata_analysis;
+
+create table if not exists ads_cmwt_t_metedata_analysis
+( db_name                   string         comment'库名'
+ ,table_name                string         comment'表名'
+ ,analysis_dimension        string         comment'详细信息'
+ ,analysis_result           string         comment'详细信息描述'
+ ,updated_time              string         comment'详细信息其他描述'
+)
+comment'表详细信息临时表'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '\001' STORED AS TEXTFILE;
+
+
+insert overwrite table ads_cmwt_t_metedata_columns
+select  k.db_name
+       ,k.table_name
+       ,k.clo_name column_name
+       ,k.data_type column_type
+       ,k.comment column_comment
+       ,substr(current_timestamp,1,19) updated_time
+  from (select  t.db_name
+               ,t.table_name
+               ,t.clo_name
+               ,t.data_type
+               ,t.comment
+               ,length(regexp_extract(t.table_name,'([0-9]+)',0)) leng_ext_table_name
+          from ads_cmwt_table_clomns_lw_tmp t
+         where t.clo_name not like '%#%'
+           and lower(nvl(t.data_type,'null')) != 'null' 
+           and t.data_type != '') k
+ where k.leng_ext_table_name < 2;
+
+
+drop table if exists ads_cmwt_t_metedata_analysis_tmp;
+
+create table if not exists ads_cmwt_t_metedata_analysis_tmp
+as
+select  k.db_name
+       ,k.table_name
+       ,k.detailed
+       ,k.info
+       ,k.other_info
+  from (select  t.db_name
+               ,t.table_name
+               ,t.detailed
+               ,t.info
+               ,t.other_info
+               ,length(regexp_extract(t.table_name,'([0-9]+)',0)) leng_ext_table_name
+          from ads_cmwt_table_analysis_lw_tmp t
+         where t.info is not null
+           and lower(nvl(t.info,'null')) <> 'null') k
+ where k.leng_ext_table_name < 2;
+
+
+
+insert overwrite table ads_cmwt_t_metedata_analysis
+select  p.db_name
+       ,p.table_name
+       ,p.analysis_dimension
+       ,p.analysis_result
+       ,substr(current_timestamp,1,19) updated_time
+  from (select  t.db_name
+               ,t.table_name
+               ,t.detailed analysis_dimension
+               ,t.info analysis_result
+          from ads_cmwt_t_metedata_analysis_tmp t
+         where t.detailed is not null
+           and lower(nvl(t.detailed,'null')) <> 'null'
+           and t.detailed <> ''
+        union all
+        select  k.db_name
+               ,k.table_name
+               ,k.info analysis_dimension
+               ,k.other_info analysis_result
+          from ads_cmwt_t_metedata_analysis_tmp k
+         where k.detailed is null
+            or lower(nvl(k.detailed,'null')) = 'null'
+            or k.detailed = '') p
+ group by p.db_name
+       ,p.table_name
+       ,p.analysis_dimension
+       ,p.analysis_result
+ order by p.db_name
+       ,p.table_name;
+
+drop table if exists ads_cmwt_table_clomns_lw_tmp;
+drop table if exists ads_cmwt_table_analysis_lw_tmp;
+
+";
+exitCodeCheck $? $startsec $run_serial_no $task_name
+
+
+cd $start_path
+
+#删除新建的文件夹 cmcs_lw
+if [ -d cmcs_lw ];then
+   rm -r cmcs_lw
+   else
+   echo "文件夹已经删除"
+fi
+
+
+cd $start_path
+
+if [ -d cmcs_lw ];then
+   rm -r cmcs_lw
+   else
+   echo "文件夹已经删除"
+fi
+
+if [ ! -d cmcs_lw ];then
+   mkdir cmcs_lw
+   else
+   echo "文件夹已经存在"
+fi
+
+db_tab_num=$start_path/cmcs_lw/db_tab_num.csv
+data_num=$start_path/cmcs_lw/data_num.csv
+
+beeline -u $hivejdbc -n $src_user -p $src_password --outputformat=csv2 -e "
+USE CMF_CMCS;
+SET mapred.job.queue.name=${hive_queue};
+SET mapred.job.name=${job_name};
+
+select concat(t.db_name,'.',t.table_name) db_tab_name
+  from ads_cmwt_t_metedata_analysis t
+ where t.analysis_dimension like 'numPartitions%';
+
+"> $db_tab_num
+
+sed -i '1d' $db_tab_num
+
+##在hdfs上创建临时目录存放表字段文件
+hadoop fs -test -e /data/ftpFiles/cmcs/tmp/db_tab_num
+if [ $? -eq 0 ] ;then
+  echo '目录已存在'
+else
+  hdfs dfs -mkdir /data/ftpFiles/cmcs/tmp/db_tab_num
+fi
+
+##将元数据文件上传到hdfs上
+hdfs dfs -put $db_tab_num /data/ftpFiles/cmcs/tmp/db_tab_num
+
+#删除本地文件
+cd $start_path
+
+if [ -d cmcs_lw ];then
+   rm -r cmcs_lw
+   else
+   echo "文件夹已经删除"
+fi
+
+
+exitCodeCheck $? $startsec $run_serial_no $task_name
+
+### 代码段-结束
+## 结束任务 ###################################
+endsec=$(date +%s)
+message="脚本耗时: $[ endsec-startsec ] 秒"
+echo $message
+
+# 回调 调度系统
+callDatahub 0 "$message" "$run_serial_no" "$task_name"
+
