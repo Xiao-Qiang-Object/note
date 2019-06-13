@@ -1,0 +1,643 @@
+#!/bin/bash
+# Time : 2019/03/05
+# Author :
+# File : 
+# Describe: hive根据疑似规则生成疑似客户
+#
+# Change:
+# Change:
+
+#打印日志
+print_log()
+{
+    current_time=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "$current_time $@"
+}
+
+startsec=$(date +%s)
+source /data/etlscript/PUBLIC/SCRIPT/TOOL/scriptHelper.sh
+resoveJson $1
+## 检查日志路径.
+checkLogPath $task_name
+exec &> $CMRH_DATAHUB_SCRIPT_LOG/$EXE_DATE/$task_name/$run_serial_no.log
+
+##参数名定义
+job_name=$0
+hivejdbc="jdbc:hive2://${src_ip}:${src_port}"
+mysqljdbc="jdbc:mysql://$dest_ip:$dest_port/$dest_dbname?useUnicode=true&characterEncoding=utf-8"
+
+pdate=${inc_start:0:8}
+begin_date=${pdate:0:4}"-"${pdate:4:2}"-"${pdate:6:2}
+
+beeline -u $hivejdbc -n $src_user -p $src_password -e "
+USE cmcs_desen;
+SET mapred.job.queue.name=${hive_queue};
+SET mapred.job.name=${job_name};
+set hive.exec.parallel=true;
+set hive.exec.parallel.thread.number=7;
+
+create temporary function uuid as 'com.cmft.ft.common.GenericUDFUuid' using jar 'file:///data/hive/udf/cmcs-hive-udf-1.0.jar';
+
+--基于DWD的数据合并客户信息
+drop table if exists ads_sccs_dwd_cust_base_tmp;
+
+create table if not exists ads_sccs_dwd_cust_base_tmp
+as
+select  t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,c.name certificate_type
+       ,t.certificate_no
+       ,t.mem_id customer_source
+       ,case when k.contact_type_id = 'mobile' then k.contact_detail else null end as mobile_no
+       ,case when k.contact_type_id = 'telephone' then k.contact_detail else null end as family_phone
+       ,'' office_phone
+       ,case when k.contact_type_id = 'email' then k.contact_detail else null end as mailbox
+       ,p.address
+       ,t.created_time create_time
+       ,t.updated_time update_time
+       ,t.created_user create_operator
+       ,t.updated_user update_operator
+  from (select t.*
+          from cmcs_desen.dwd_cust_base t
+         where t.mem_id != '99999') t
+  left join (select c.code,c.name
+               from cmcs_desen.dic_group c
+              where c.category = 'certificate') c
+    on t.certificate_type = c.code
+  left join cmcs_desen.dwd_cust_contact k
+    on t.customer_id = k.customer_id
+   and t.mem_id = k.mem_id
+  left join (select  p.customer_id
+                    ,p.mem_id
+                    ,p.address
+                    ,p.address_status
+               from cmcs_desen.dwd_cust_address p
+              where p.address_status = '1') p
+    on t.customer_id = p.customer_id
+   and t.mem_id = k.mem_id
+  left join (select q.customer_id
+               from cmcs_desen.ads_sccs_sus_cust_info q
+              where q.status != '2') q  --剔除数据状态为初始化/待审核/无法核实的数据
+    on t.customer_id = q.customer_id
+ where q.customer_id is null;
+
+--根据合并的客户信息与疑似客户信息核实表取客户最新信息的数据
+drop table if exists ads_sccs_sus_cust_base_info_tmp;
+
+create table if not exists ads_sccs_sus_cust_base_info_tmp
+as
+select  q.customer_id
+       ,q.main_customer_id
+       ,q.mem_customer_id
+       ,q.name
+       ,q.birthday
+       ,q.gender
+       ,q.certificate_type
+       ,q.certificate_no
+       ,q.customer_source
+       ,q.mobile_no
+       ,q.family_phone
+       ,q.office_phone
+       ,q.mailbox
+       ,q.address
+       ,'0' status
+       ,q.create_time
+       ,q.update_time
+       ,q.create_operator
+       ,q.update_operator
+  from (select  p.customer_id
+               ,p.main_customer_id
+               ,p.mem_customer_id
+               ,p.name
+               ,p.birthday
+               ,p.gender
+               ,p.certificate_type
+               ,p.certificate_no
+               ,p.customer_source
+               ,p.mobile_no
+               ,p.family_phone
+               ,p.office_phone
+               ,p.mailbox
+               ,p.address
+               ,p.create_time
+               ,p.update_time
+               ,p.create_operator
+               ,p.update_operator
+               ,p.data_flag
+               ,row_number() over(distribute by p.customer_id sort by p.data_flag desc) desc_seq
+          from (select  t.customer_id
+                       ,t.main_customer_id
+                       ,t.mem_customer_id
+                       ,t.name
+                       ,t.birthday
+                       ,t.gender
+                       ,t.certificate_type
+                       ,t.certificate_no
+                       ,t.customer_source
+                       ,t.mobile_no
+                       ,t.family_phone
+                       ,t.office_phone
+                       ,t.mailbox
+                       ,t.address
+                       ,t.create_time
+                       ,t.update_time
+                       ,t.create_operator
+                       ,t.update_operator
+                       ,'1' data_flag
+                  from ads_sccs_dwd_cust_base_tmp t
+                union all
+                select  k.customer_id
+                       ,k.main_customer_id
+                       ,k.mem_customer_id
+                       ,k.name
+                       ,k.birthday
+                       ,k.gender
+                       ,k.certificate_type
+                       ,k.certificate_no
+                       ,k.customer_source
+                       ,k.mobile_no
+                       ,k.family_phone
+                       ,k.office_phone
+                       ,k.mailbox
+                       ,k.address
+                       ,k.create_time
+                       ,k.update_time
+                       ,k.create_operator
+                       ,k.update_operator
+                       ,'2' data_flag
+                  from ads_sccs_sus_cust_check_info k) p) q
+ where q.desc_seq = 1;
+
+--取客户最新信息的数据与mysql工单处理任务表关联，取状态为审核成功（或者其他状态？）
+drop table if exists ads_sccs_sus_cust_audit_success_tmp;
+
+create table if not exists ads_sccs_sus_cust_audit_success_tmp
+as
+select  t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,case when t.certificate_type = '居民身份证' and length(t.certificate_no) = 18
+          then concat(substr(t.certificate_no,1,6),substr(t.certificate_no,9,9)) else t.certificate_no
+          end certificate_no_15
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+  from ads_sccs_sus_cust_base_info_tmp t
+  left join (select n.customer_id
+               from (select m.work_id
+                       from ads_sccs_work_order_detail m
+                      where m.status != '8') m
+               join ads_sccs_cust_merge_task n
+                 on m.work_id = n.work_id) k  --取状态为审核不成功的
+    on t.customer_id = k.customer_id
+ where k.customer_id is null;--取状态为审核成功的
+
+
+--取所有客户的最新信息且该客户最终的状态为审核成功的（或者其他状态？）关联规则表生成疑似客户表
+--在这个位置生成uuid，生成工单号和受理号
+
+--1 证件类型+证件号+性别+出生日期
+drop table if exists ads_sccs_rule_number_001_tmp;
+
+create table if not exists ads_sccs_rule_number_001_tmp
+as
+select  c.certificate_type,c.certificate_no_15,c.gender,c.birthday,c.num
+       ,row_number() over() seq_num
+  from (select uuid() work_id,t.certificate_type,t.certificate_no_15,t.gender,t.birthday,count(distinct t.main_customer_id) num
+          from ads_sccs_sus_cust_audit_success_tmp t
+         group by t.certificate_type,t.certificate_no_15,t.gender,t.birthday
+        having num > 1) c;
+
+drop table if exists ads_sccs_sus_rule_cust_001_tmp;
+
+create table if not exists ads_sccs_sus_rule_cust_001_tmp
+as
+select  concat('W',regexp_replace(substr(current_date,3,8),'-',''),'01',k.seq_num) work_id
+       --,k.seq_num
+       --,uuid() accept_id
+       ,t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,t.certificate_no_15
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+       ,'name+certificate_no_15+gender+birthday' rule_code
+       ,'证件类型+证件号+性别+出生日期' rule_name
+  from ads_sccs_sus_cust_audit_success_tmp t
+  join ads_sccs_rule_number_001_tmp k
+    on nvl(t.certificate_type,0) = nvl(k.certificate_type,0)
+   and nvl(t.certificate_no_15,0) = nvl(k.certificate_no_15,0)
+   and nvl(t.gender,0) = nvl(k.gender,0)
+   and nvl(t.birthday,0) = nvl(k.birthday,0);
+
+--2 姓名+证件类型+证件号+出生日期
+drop table if exists ads_sccs_rule_number_002_tmp;
+
+create table if not exists ads_sccs_rule_number_002_tmp
+as
+select  c.name,c.certificate_type,c.certificate_no_15,c.birthday,c.num
+       ,row_number() over() seq_num
+  from (select uuid() work_id,t.name,t.certificate_type,t.certificate_no_15,t.birthday,count(distinct t.main_customer_id) num
+          from ads_sccs_sus_cust_audit_success_tmp t
+          left join ads_sccs_sus_rule_cust_001_tmp k
+            on t.customer_id = k.customer_id
+         where k.customer_id is null
+         group by t.name,t.certificate_type,t.certificate_no_15,t.birthday
+        having num > 1) c;
+
+drop table if exists ads_sccs_sus_rule_cust_002_tmp;
+
+create table if not exists ads_sccs_sus_rule_cust_002_tmp
+as
+select  concat('W',regexp_replace(substr(current_date,3,8),'-',''),'02',k.seq_num) work_id
+       --,uuid() accept_id
+       ,t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,t.certificate_no_15
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+       ,'name+certificate_type+certificate_no_15+birthday' rule_code
+       ,'姓名+证件类型+证件号+出生日期' rule_name
+  from ads_sccs_sus_cust_audit_success_tmp t
+  join ads_sccs_rule_number_002_tmp k
+    on nvl(t.name,0) = nvl(k.name,0)
+   and nvl(t.certificate_type,0) = nvl(k.certificate_type,0)
+   and nvl(t.certificate_no_15,0) = nvl(k.certificate_no_15,0)
+   and nvl(t.birthday,0) = nvl(k.birthday,0);
+
+--3 姓名+证件号+性别+出生日期
+drop table if exists ads_sccs_rule_number_003_tmp;
+
+create table if not exists ads_sccs_rule_number_003_tmp
+as
+select  c.name,c.certificate_no_15,c.gender,c.birthday,c.num
+       ,row_number() over() seq_num
+  from (select uuid() work_id,t.name,t.certificate_no_15,t.gender,t.birthday,count(distinct t.main_customer_id) num
+          from ads_sccs_sus_cust_audit_success_tmp t
+          left join ads_sccs_sus_rule_cust_001_tmp k
+            on t.customer_id = k.customer_id
+          left join ads_sccs_sus_rule_cust_002_tmp p
+            on t.customer_id = p.customer_id
+         where k.customer_id is null
+           and p.customer_id is null
+         group by t.name,t.certificate_no_15,t.gender,t.birthday
+        having num > 1) c;
+
+drop table if exists ads_sccs_sus_rule_cust_003_tmp;
+
+create table if not exists ads_sccs_sus_rule_cust_003_tmp
+as
+select  concat('W',regexp_replace(substr(current_date,3,8),'-',''),'03',k.seq_num) work_id
+       --,uuid() accept_id
+       ,t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,t.certificate_no_15
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+       ,'name+certificate_no_15+gender+birthday' rule_code
+       ,'姓名+证件号+性别+出生日期' rule_name
+  from ads_sccs_sus_cust_audit_success_tmp t
+  join ads_sccs_rule_number_003_tmp k
+    on nvl(t.name,0) = nvl(k.name,0)
+   and nvl(t.certificate_no_15,0) = nvl(k.certificate_no_15,0)
+   and nvl(t.gender,0) = nvl(k.gender,0)
+   and nvl(t.birthday,0) = nvl(k.birthday,0);
+
+--4姓名+证件号+出生日期
+drop table if exists ads_sccs_rule_number_004_tmp;
+
+create table if not exists ads_sccs_rule_number_004_tmp
+as
+select  c.name,c.certificate_no_15,c.birthday,c.num
+       ,row_number() over() seq_num
+  from (select uuid() work_id,t.name,t.certificate_no_15,t.birthday,count(distinct t.main_customer_id) num
+          from ads_sccs_sus_cust_audit_success_tmp t
+          left join ads_sccs_sus_rule_cust_001_tmp k
+            on t.customer_id = k.customer_id
+          left join ads_sccs_sus_rule_cust_002_tmp p
+            on t.customer_id = p.customer_id
+          left join ads_sccs_sus_rule_cust_003_tmp q
+            on t.customer_id = q.customer_id
+         where k.customer_id is null
+           and p.customer_id is null
+           and q.customer_id is null
+         group by t.name,t.certificate_no_15,t.birthday
+        having num > 1) c;
+
+drop table if exists ads_sccs_sus_rule_cust_004_tmp;
+
+create table if not exists ads_sccs_sus_rule_cust_004_tmp
+as
+select  concat('W',regexp_replace(substr(current_date,3,8),'-',''),'04',k.seq_num) work_id
+       --,uuid() accept_id
+       ,t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,t.certificate_no_15
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+       ,'name+certificate_no_15+birthday' rule_code
+       ,'姓名+证件号+出生日期' rule_name
+  from ads_sccs_sus_cust_audit_success_tmp t
+  join ads_sccs_rule_number_004_tmp k
+    on nvl(t.name,0) = nvl(k.name,0)
+   and nvl(t.certificate_no_15,0) = nvl(k.certificate_no_15,0)
+   and nvl(t.birthday,0) = nvl(k.birthday,0);
+
+--汇总根据规则整理出来的疑似客户
+drop table if exists ads_sccs_sus_cust_info_mid_tmp;
+
+create table if not exists ads_sccs_sus_cust_info_mid_tmp
+as
+select  t.work_id
+       ,t.customer_id
+       ,t.main_customer_id
+       ,t.mem_customer_id
+       ,t.name
+       ,t.birthday
+       ,t.gender
+       ,t.certificate_type
+       ,t.certificate_no
+       ,t.customer_source
+       ,t.mobile_no
+       ,t.family_phone
+       ,t.office_phone
+       ,t.mailbox
+       ,t.address
+       ,t.status
+       ,k.rule_id
+       ,current_date() stat_date
+       ,t.create_time
+       ,t.update_time
+       ,t.create_operator
+       ,t.update_operator
+       ,dense_rank() over(distribute by t.work_id sort by t.customer_source) rank_num
+       ,row_number() over() seq_num
+  from (select  t.work_id
+               --,t.accept_id
+               ,t.customer_id
+               ,t.main_customer_id
+               ,t.mem_customer_id
+               ,t.name
+               ,t.birthday
+               ,t.gender
+               ,t.certificate_type
+               ,t.certificate_no_15
+               ,t.certificate_no
+               ,t.customer_source
+               ,t.mobile_no
+               ,t.family_phone
+               ,t.office_phone
+               ,t.mailbox
+               ,t.address
+               ,t.status
+               ,t.create_time
+               ,t.update_time
+               ,t.create_operator
+               ,t.update_operator
+               ,t.rule_code
+               ,t.rule_name
+          from ads_sccs_sus_rule_cust_001_tmp t
+        union all
+        select  t.work_id
+               --,t.accept_id
+               ,t.customer_id
+               ,t.main_customer_id
+               ,t.mem_customer_id
+               ,t.name
+               ,t.birthday
+               ,t.gender
+               ,t.certificate_type
+               ,t.certificate_no_15
+               ,t.certificate_no
+               ,t.customer_source
+               ,t.mobile_no
+               ,t.family_phone
+               ,t.office_phone
+               ,t.mailbox
+               ,t.address
+               ,t.status
+               ,t.create_time
+               ,t.update_time
+               ,t.create_operator
+               ,t.update_operator
+               ,t.rule_code
+               ,t.rule_name
+          from ads_sccs_sus_rule_cust_002_tmp t
+        union all
+        select  t.work_id
+               --,t.accept_id
+               ,t.customer_id
+               ,t.main_customer_id
+               ,t.mem_customer_id
+               ,t.name
+               ,t.birthday
+               ,t.gender
+               ,t.certificate_type
+               ,t.certificate_no_15
+               ,t.certificate_no
+               ,t.customer_source
+               ,t.mobile_no
+               ,t.family_phone
+               ,t.office_phone
+               ,t.mailbox
+               ,t.address
+               ,t.status
+               ,t.create_time
+               ,t.update_time
+               ,t.create_operator
+               ,t.update_operator
+               ,t.rule_code
+               ,t.rule_name
+          from ads_sccs_sus_rule_cust_003_tmp t
+        union all
+        select  t.work_id
+               --,t.accept_id
+               ,t.customer_id
+               ,t.main_customer_id
+               ,t.mem_customer_id
+               ,t.name
+               ,t.birthday
+               ,t.gender
+               ,t.certificate_type
+               ,t.certificate_no_15
+               ,t.certificate_no
+               ,t.customer_source
+               ,t.mobile_no
+               ,t.family_phone
+               ,t.office_phone
+               ,t.mailbox
+               ,t.address
+               ,t.status
+               ,t.create_time
+               ,t.update_time
+               ,t.create_operator
+               ,t.update_operator
+               ,t.rule_code
+               ,t.rule_name
+          from ads_sccs_sus_rule_cust_004_tmp t) t
+  left join cmcs_desen.ads_sccs_rule k
+    on t.rule_name = k.rule_name;
+
+insert overwrite table ads_sccs_sus_cust_info_mid
+select distinct case when length(k.sus_id) = 8 then concat(substr(k.sus_id,1,7),'00000',substr(k.sus_id,-1,1))
+             when length(k.sus_id) = 9 then concat(substr(k.sus_id,1,7),'0000',substr(k.sus_id,-2,2))
+             when length(k.sus_id) = 10 then concat(substr(k.sus_id,1,7),'000',substr(k.sus_id,-3,3))
+             when length(k.sus_id) = 11 then concat(substr(k.sus_id,1,7),'00',substr(k.sus_id,-4,4))
+             when length(k.sus_id) = 12 then concat(substr(k.sus_id,1,7),'0',substr(k.sus_id,-5,5))
+          else k.sus_id end sus_id
+       ,case when length(k.work_id) = 10 then concat(substr(k.work_id,1,9),'000',substr(k.work_id,-1,1))
+             when length(k.work_id) = 11 then concat(substr(k.work_id,1,9),'00',substr(k.work_id,-2,2))
+             when length(k.work_id) = 12 then concat(substr(k.work_id,1,9),'0',substr(k.work_id,-3,3))
+          else k.work_id end work_id
+       ,case when length(k.accept_id) = 11 then concat(substr(k.accept_id,1,9),'0000',substr(k.accept_id,-2,2))
+             when length(k.accept_id) = 12 then concat(substr(k.accept_id,1,9),'000',substr(k.accept_id,-3,3))
+             when length(k.accept_id) = 13 then concat(substr(k.accept_id,1,9),'00',substr(k.accept_id,-4,4))
+             when length(k.accept_id) = 14 then concat(substr(k.accept_id,1,9),'0',substr(k.accept_id,-5,5))
+          else k.accept_id end accept_id
+       ,k.customer_id
+       ,k.main_customer_id
+       ,k.mem_customer_id
+       ,k.name
+       ,k.birthday
+       ,k.gender
+       ,k.certificate_type
+       ,k.certificate_no
+       ,k.customer_source
+       ,k.mobile_no
+       ,k.family_phone
+       ,k.office_phone
+       ,k.mailbox
+       ,k.address
+       ,k.status
+       ,k.rule_id
+       ,k.stat_date
+       ,k.create_time
+       ,k.update_time
+       ,k.create_operator
+       ,k.update_operator
+  from (select  concat('S',regexp_replace(substr(current_date,3,8),'-',''),t.seq_num) sus_id
+               ,t.work_id
+               ,concat(regexp_replace(t.work_id,'W','A'),t.rank_num) accept_id
+               ,t.customer_id
+               ,t.main_customer_id
+               ,t.mem_customer_id
+               ,t.name
+               ,t.birthday
+               ,t.gender
+               ,t.certificate_type
+               ,t.certificate_no
+               ,t.customer_source
+               ,t.mobile_no
+               ,t.family_phone
+               ,t.office_phone
+               ,t.mailbox
+               ,t.address
+               ,t.status
+               ,t.rule_id
+               ,current_date() stat_date
+               ,t.create_time
+               ,t.update_time
+               ,t.create_operator
+               ,t.update_operator
+          from ads_sccs_sus_cust_info_mid_tmp t) k;
+
+drop table if exists ads_sccs_dwd_cust_base_tmp;
+drop table if exists ads_sccs_sus_cust_base_info_tmp;
+drop table if exists ads_sccs_sus_cust_audit_success_tmp;
+drop table if exists ads_sccs_rule_number_001_tmp;
+drop table if exists ads_sccs_sus_rule_cust_001_tmp;
+drop table if exists ads_sccs_rule_number_002_tmp;
+drop table if exists ads_sccs_sus_rule_cust_002_tmp;
+drop table if exists ads_sccs_rule_number_003_tmp;
+drop table if exists ads_sccs_sus_rule_cust_003_tmp;
+drop table if exists ads_sccs_rule_number_004_tmp;
+drop table if exists ads_sccs_sus_rule_cust_004_tmp;
+drop table if exists ads_sccs_sus_cust_info_mid_tmp;
+
+";
+exitCodeCheck $? $startsec $run_serial_no $task_name
+### 代码段-结束
+## 结束任务 ###################################
+endsec=$(date +%s)
+message="脚本耗时: $[ endsec-startsec ] 秒"
+echo $message
+
+# 回调 调度系统
+callDatahub 0 "$message" "$run_serial_no" "$task_name"
+
