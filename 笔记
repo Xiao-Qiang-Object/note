@@ -1,1 +1,0 @@
-1.sql的坑format_number（hive）format（mysql）函数在格式化数值时会默认添加千位分隔符
