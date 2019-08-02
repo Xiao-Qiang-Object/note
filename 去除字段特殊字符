@@ -1,9 +1,0 @@
-insert overwrite table ***
-select  regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-       ,regexp_replace(regexp_replace(regexp_replace(t.***,'\0',''),'\012',''),'\015' ,'') as ***
-  from **** t;
